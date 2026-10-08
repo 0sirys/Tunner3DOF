@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { Plug, PlugZap, Plus } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Plug, PlugZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -20,20 +20,42 @@ export function SerialPanel() {
   const [baudRate, setBaudRate] = useState<number>(115200)
   const [ports, setPorts] = useState<string[]>([])
   const [selectedIndex, setSelectedIndex] = useState<number | null>(0)
-  const [error] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const locked = status === 'connected' || status === 'connecting'
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
+    if (selectedIndex === null) return
     setStatus('connecting')
-    setTimeout(() => {
+    setError(null)
+    try {
+      await invoke('serial_open', {
+        portName: ports[selectedIndex],
+        baudRate,
+      })
       setStatus('connected')
-    }, 1000)
+    } catch (e) {
+      setStatus('error')
+      console.error(e);
+      setError(String(e))
+    }
   }
 
   const handleDisconnect = () => {
     setStatus('disconnected')
   }
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const names = await invoke<string[]>('serial_names');
+        setPorts(names);
+        setSelectedIndex(names.length ? 0 : null);
+      } catch (e) {
+        console.error(e);
+      }
+    })();
+  }, []);
 
   return (
     <section aria-labelledby="serial-title" className="flex flex-col gap-4">
@@ -90,22 +112,6 @@ export function SerialPanel() {
             </select>
             <Chevron />
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              invoke<string[]>('serial_names').then((values) => {
-                setPorts(values)
-              }).catch((err) => {
-                console.log(err)
-              })
-            }}
-            disabled={locked}
-            className="flex size-12 shrink-0 items-center justify-center rounded-md border border-border bg-face text-muted-foreground transition-colors hover:border-signal hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-            aria-label="Buscar puerto COM"
-            title="Buscar puerto"
-          >
-            <Plus className="size-5" aria-hidden="true" />
-          </button>
         </div>
       </div>
 

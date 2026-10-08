@@ -4,7 +4,6 @@ import { useState } from 'react'
 import { usePositioner } from '@/hooks/use-positioner'
 import { AXES } from '@/lib/positioner'
 import { AxisCard } from './axis-card'
-import { GeneratorPanel } from './generator-panel'
 import { PidPanel } from './pid-panel'
 import { SerialPanel } from './serial-panel'
 import { TopBar } from './top-bar'
@@ -29,13 +28,6 @@ export function HmiDashboard() {
           <div className="border-t border-border" />
           <PidPanel selected={selected} onSelect={setSelected} gains={hmi.gains} onApply={hmi.applyGains} />
           <div className="border-t border-border" />
-          <GeneratorPanel
-            mode={hmi.mode}
-            generator={hmi.generator}
-            onGeneratorChange={hmi.setGenerator}
-            manual={hmi.manual}
-            onManualChange={hmi.setManualSetpoint}
-          />
         </aside>
 
         <main className="order-first flex min-w-0 flex-1 flex-col gap-4 p-4 md:order-none md:overflow-y-auto">

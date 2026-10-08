@@ -4,10 +4,12 @@ import { RotateCcw } from 'lucide-react'
 import { useState } from 'react'
 import { AXES, DEFAULT_GAINS, type Gains } from '@/lib/positioner'
 import { cn } from '@/lib/utils'
+import { invoke } from '@tauri-apps/api/core'
 
 type Draft = Record<keyof Gains, string>
 
 const toDraft = (g: Gains): Draft => ({ kp: String(g.kp), ki: String(g.ki), kd: String(g.kd) })
+const CMD_SET_PID = 0x01;
 
 const FIELDS: { key: keyof Gains; label: string; hint: string }[] = [
   { key: 'kp', label: 'Kp', hint: 'Ganancia proporcional' },
@@ -39,8 +41,25 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
   const updateDraft = (key: keyof Gains, value: string) =>
     setDrafts((prev) => prev.map((d, i) => (i === selected ? { ...d, [key]: value } : d)))
 
-  const apply = () => {
-    if (canApply) onApply(selected, parsed)
+  const apply = async () => {
+    if (!canApply) return;
+    onApply(selected, parsed);
+    //  ejemplo payload   [j][kpH][kpL][kiH][kiL][kdH][kdL]   (LEN=7, int16 x1000 BE)
+    const buf = new DataView(new ArrayBuffer(7));
+    buf.setUint8(0, selected);
+    buf.setUint16(1, parsed.kp, false);
+    buf.setUint16(3, parsed.ki, false);
+    buf.setUint16(5, parsed.kd, false);
+    try {
+
+      await invoke('write_serial_data', {
+        cmd: CMD_SET_PID,
+        payload: Array.from(new Uint8Array(buf.buffer)),
+      });
+    } catch (e) {
+      console.error(e);
+    }
+
   }
 
   const restoreDefaults = () =>
@@ -110,8 +129,12 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
                 ? 'bg-signal text-signal-foreground hover:bg-signal/90'
                 : 'cursor-default bg-signal/40 text-signal-foreground/70',
             )}
+
           >
-            {!valid ? 'VALOR INVÁLIDO' : dirty ? 'APLICAR' : 'APLICADO'}
+            {!valid ? 'VALOR INVÁLIDO' : dirty ? 'APLICAR' : 'APLICADO'
+
+
+            }
           </button>
           <button
             type="button"
