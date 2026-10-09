@@ -27,9 +27,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             serial_names,
             serial_open,
-            read_serial_data,
+            serial_close,
             write_serial_data,
-            deserialize_serial_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -49,6 +48,7 @@ fn serial_names() -> Result<Vec<String>, String> {
 #[tauri::command]
 fn serial_open(
     state: State<PortState>,
+    _acks: State<AckState>,
     app: AppHandle,
     port_name: String,
     baud_rate: u32,
@@ -63,35 +63,41 @@ fn serial_open(
         .map_err(|e| format!("Mutex envenenado: {e}"))? = Some(port);
 
     std::thread::spawn(move || {
+        log::info!("hilo vivo");
         loop {
             let state = app.state::<PortState>();
             let mut guard = match state.0.lock() {
                 Ok(g) => g,
                 Err(_) => break,
             };
+
             let port = match guard.as_mut() {
                 Some(p) => p,
                 None => break,
             };
+
             let mut b = [0u8; 1];
+
             match port.read(&mut b) {
                 Ok(0) => {
+                    log::info!("MAGIC no llego {}", b[0]);
                     drop(guard);
                     std::thread::sleep(Duration::from_millis(5));
                     continue;
                 }
                 Ok(_) => {
-                    if b[0] != 0x55 {
+                    if b[0] != telemetry::MAGIC_ACK && b[0] != telemetry::MAGIC_TELEM {
                         continue;
                     }
+                    log::info!("MAGIC {}", b[0]);
+                    let magic = b[0];
                     let mut hl = [0u8; 2];
                     if port.read_exact(&mut hl).is_err() {
                         continue;
                     }
-                    let (cmd, sb) = (hl[0], hl[1]);
-                    if cmd == telemetry::CMD_TELEM {
-                        let len = sb as usize;
-                        let mut payload = vec![0u8; len];
+                    let (cmd, len) = (hl[0], hl[1]);
+                    if magic == telemetry::MAGIC_TELEM {
+                        let mut payload = vec![0u8; len as usize];
                         if port.read_exact(&mut payload).is_err() {
                             continue;
                         }
@@ -100,47 +106,74 @@ fn serial_open(
                             continue;
                         }
                         drop(guard);
-                        let calc = payload.iter().fold(cmd ^ sb, |a, b| a ^ b);
+                        let calc = payload.iter().fold(cmd ^ len, |a, b| a ^ b);
                         if calc != chk[0] {
                             continue;
                         }
-                        let _ = app.emit("telemetry", payload);
-                    } else {
-                        // ACK de 4 bytes: [55][CMD][STATUS][CMD^STATUS]
-                        let status = sb;
+                        match telemetry::deserialize(magic, cmd, &payload) {
+                            Ok(telemetry::FrameData::Telem(t)) => {
+                                let _ = app.emit("telemetry", t);
+                            }
+                            Ok(_) => {}
+                            Err(_) => continue,
+                        }
+                    } else if magic == telemetry::MAGIC_ACK {
+                        // ACK con LEN: [56][CMD][LEN][STATUS][CHK=CMD^LEN^STATUS], LEN=1
+                        let mut payload = vec![0u8; len as usize];
+                        if port.read_exact(&mut payload).is_err() {
+                            continue;
+                        }
                         let mut chk = [0u8; 1];
                         if port.read_exact(&mut chk).is_err() {
                             continue;
                         }
                         drop(guard);
-                        if chk[0] != (cmd ^ status) {
+                        let calc = payload.iter().fold(cmd ^ len, |a, b| a ^ b);
+                        if calc != chk[0] {
                             continue;
                         }
-                        if let Ok(acks) = app.state::<AckState>().0.lock().as_deref_mut() {
-                            acks.insert(cmd, status);
+                        match telemetry::deserialize(magic, cmd, &payload) {
+                            Ok(telemetry::FrameData::Ack { cmd, status }) => {
+                                if let Ok(acks) = app.state::<AckState>().0.lock().as_deref_mut() {
+                                    acks.insert(cmd, status);
+                                }
+                            }
+                            _ => continue,
                         }
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
-                Err(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    continue;
+                }
+                Err(e) => {
+                    log::error!("serial read err : {} ", e);
+                    break;
+                }
             }
         }
     });
+    // Pide arranque de telemetría sin esperar ACK (temporal):
+    // [55][CMD_TELEM][00][CHK=CMD_TELEM]
+    {
+        let mut guard = state
+            .0
+            .lock()
+            .map_err(|e| format!("Mutex envenenado: {e}"))?;
+        let port = guard.as_mut().ok_or("puerto no abierto")?;
+        let cmd = telemetry::CMD_TELEM;
+        port.write_all(&[telemetry::MAGIC_CMD, cmd, 0, cmd])
+            .map_err(|e| format!("Error al pedir telemetría: {e}"))?;
+    }
     Ok(0)
 }
 
 #[tauri::command]
-fn read_serial_data(state: State<PortState>) -> Result<Vec<u8>, String> {
-    let mut guard = state
+fn serial_close(state: State<PortState>) -> Result<(), String> {
+    *state
         .0
         .lock()
-        .map_err(|e| format!("Mutex envenenado: {e}"))?;
-    let port = guard.as_mut().ok_or("puerto no abierto")?;
-    let mut buffer = [0u8; 1024];
-    let n = port
-        .read(&mut buffer)
-        .map_err(|e| format!("Error al leer datos del puerto: {e}"))?;
-    Ok(buffer[..n].to_vec())
+        .map_err(|e| format!("Mutex envenenado: {e}"))? = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -158,7 +191,7 @@ fn write_serial_data(
         let port = guard.as_mut().ok_or("puerto no abierto")?;
         let len = payload.len() as u8;
         let chk = payload.iter().fold(cmd ^ len, |a, b| a ^ b);
-        let mut frame = vec![telemetry::MAGIC_HEADER, cmd, len];
+        let mut frame = vec![telemetry::MAGIC_CMD, cmd, len];
         frame.extend_from_slice(&payload);
         frame.push(chk);
         // Limpia un ACK viejo del mismo comando antes de enviar
@@ -173,7 +206,7 @@ fn write_serial_data(
     loop {
         if let Ok(m) = acks.0.lock().as_deref_mut() {
             if let Some(status) = m.remove(&cmd) {
-                telemetry::ack_ok(cmd, status, cmd ^ status)?;
+                telemetry::ack_ok(cmd, 1, status, cmd ^ 1 ^ status)?;
                 return Ok(status);
             }
         }
@@ -182,27 +215,4 @@ fn write_serial_data(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-}
-
-#[tauri::command]
-fn deserialize_serial_data(data: Vec<u8>) -> Result<(), String> {
-    if data.len() < 4 {
-        return Err("trama muy corta".into());
-    }
-    let magic: u8 = data[0];
-    let cmd = data[1];
-    let len = data[2] as usize;
-    if magic != telemetry::MAGIC_HEADER {
-        return Err("MAGIC inválido".into());
-    }
-    if data.len() < 3 + len + 1 {
-        return Err("LEN no coincide".into());
-    }
-    let payload = &data[3..3 + len];
-    let chk_rx = data[3 + len];
-    let chk = payload.iter().fold(cmd ^ len as u8, |a, b| a ^ b);
-    if chk != chk_rx {
-        return Err("CHK inválido".into());
-    }
-    Ok(())
 }

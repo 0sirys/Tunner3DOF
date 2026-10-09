@@ -41,7 +41,12 @@ export function SerialPanel() {
     }
   }
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
+    try {
+      await invoke('serial_close')
+    } catch (e) {
+      console.error(e)
+    }
     setStatus('disconnected')
   }
 

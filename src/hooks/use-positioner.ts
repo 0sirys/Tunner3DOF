@@ -36,17 +36,14 @@ export function usePositioner() {
   useEffect(() => {
     let unlisten: (() => void) | undefined
     ;(async () => {
-      unlisten = await listen<number[]>('telemetry', (e) => {
-        const b = e.payload
-        if (b.length < 12) return
-        const u16 = (o: number) => ((b[o] << 8) | b[o + 1]) >>> 0
+      unlisten = await listen<{ pos: number[]; tgt: number[] }>('telemetry', (e) => {
+        const { pos, tgt } = e.payload
+        if (pos.length < 3 || tgt.length < 3) return
         setTime((t) => t + 1)
         setLive(
           [0, 1, 2].map((i) => {
-            const pos = u16(i * 4)
-            const tgt = u16(i * 4 + 2)
-            const error = ((tgt - pos + 540) % 360) - 180
-            return { position: pos, setpoint: tgt, error, velocity: 0, output: 0, zero: 0 }
+            const error = ((tgt[i] - pos[i] + 540) % 360) - 180
+            return { position: pos[i], setpoint: tgt[i], error, velocity: 0, output: 0, zero: 0 }
           }),
         )
       })
