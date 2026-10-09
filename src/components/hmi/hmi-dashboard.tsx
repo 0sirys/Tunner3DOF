@@ -44,7 +44,7 @@ export function HmiDashboard() {
             </span>
           </div>
 
-          <div className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4">
+          <div className="flex flex-col gap-4">
             {AXES.map((axis, i) => (
               <AxisCard
                 key={axis.id}
@@ -54,10 +54,8 @@ export function HmiDashboard() {
                 drivesOn={hmi.drivesOn}
                 selected={selected === i}
                 onSelect={() => setSelected(i)}
-                onNudgeZero={(d) => hmi.nudgeZero(i, d)}
-                onZeroHere={() => hmi.zeroHere(i)}
-                onResetZero={() => hmi.resetZero(i)}
-                onZeroChange={(z) => hmi.setZero(i, z)}
+                onInvert={() => hmi.toggleDir(i)}
+                inverted={hmi.dirs[i] === 1}
                 manualMode={hmi.mode === 'manual'}
                 onSetpointChange={(sp) => hmi.setManualSetpoint(i, sp)}
               />

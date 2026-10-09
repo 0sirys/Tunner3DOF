@@ -1,46 +1,25 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import {
-  type AxisSim,
   type AxisSnapshot,
-  computeSetpoint,
   DEFAULT_GAINS,
   DEFAULT_GENERATOR,
-  displayPosition,
   type Gains,
   type GeneratorConfig,
   type Mode,
-  stepAxis,
-  wrap360,
 } from '@/lib/positioner'
 
-const SUBSTEP = 0.001
-const MAX_FRAME_DT = 0.05
-
-interface Config {
-  mode: Mode
-  drivesOn: boolean
-  gains: Gains[]
-  generator: GeneratorConfig
-  manual: number[]
-}
-
-const initialAxes = (): AxisSim[] => [
-  { abs: 100, vel: 0, integral: 0, output: 0, zero: 345 },
-  { abs: 340, vel: 0, integral: 0, output: 0, zero: 0 },
-  { abs: 300, vel: 0, integral: 0, output: 0, zero: 0 },
-]
-
-const snapshotOf = (axes: AxisSim[], setpoints: number[], errors: number[]): AxisSnapshot[] =>
-  axes.map((a, i) => ({
-    position: displayPosition(a),
-    setpoint: setpoints[i],
-    error: errors[i],
-    velocity: a.vel,
-    output: a.output,
-    zero: a.zero,
-  }))
+const EMPTY_AXES: AxisSnapshot[] = [0, 1, 2].map(() => ({
+  position: 0,
+  setpoint: 0,
+  error: 0,
+  velocity: 0,
+  output: 0,
+  zero: 0,
+}))
 
 export function usePositioner() {
   const [mode, setMode] = useState<Mode>('sine')
@@ -48,78 +27,57 @@ export function usePositioner() {
   const [gains, setGains] = useState<Gains[]>(DEFAULT_GAINS)
   const [generator, setGenerator] = useState<GeneratorConfig>(DEFAULT_GENERATOR)
   const [manual, setManual] = useState<number[]>([0, 90, 180])
-
-  const axesRef = useRef<AxisSim[]>(initialAxes())
-  const timeRef = useRef(0)
-  const configRef = useRef<Config>({ mode, drivesOn, gains, generator, manual })
-  configRef.current = { mode, drivesOn, gains, generator, manual }
+  const [dirs, setDirs] = useState<number[]>([0, 0, 0])
 
   const [time, setTime] = useState(0)
-  const [snapshot, setSnapshot] = useState<AxisSnapshot[]>(() =>
-    snapshotOf(axesRef.current, [0, 0, 0], [0, 0, 0]),
-  )
+  // Telemetría real: [pos0H,pos0L,tgt0H,tgt0L, pos1H,pos1L,tgt1H,tgt1L, pos2H,pos2L,tgt2H,tgt2L] uint16 BE grados
+  const [live, setLive] = useState<AxisSnapshot[] | null>(null)
 
   useEffect(() => {
-    let frame = 0
-    let last = performance.now()
-
-    const tick = (now: number) => {
-      const frameDt = Math.min((now - last) / 1000, MAX_FRAME_DT)
-      last = now
-      const cfg = configRef.current
-      const axes = axesRef.current
-      const setpoints = [0, 0, 0]
-      const errors = [0, 0, 0]
-      const steps = Math.max(1, Math.round(frameDt / SUBSTEP))
-
-      for (let s = 0; s < steps; s++) {
-        timeRef.current += SUBSTEP
-        axes.forEach((axis, i) => {
-          setpoints[i] = computeSetpoint(cfg.mode, cfg.generator, timeRef.current, i, cfg.manual[i])
-          errors[i] = stepAxis(axis, cfg.gains[i], setpoints[i], SUBSTEP, cfg.drivesOn)
-        })
-      }
-
-      setTime(timeRef.current)
-      setSnapshot(snapshotOf(axes, setpoints, errors))
-      frame = requestAnimationFrame(tick)
+    let unlisten: (() => void) | undefined
+    ;(async () => {
+      unlisten = await listen<number[]>('telemetry', (e) => {
+        const b = e.payload
+        if (b.length < 12) return
+        const u16 = (o: number) => ((b[o] << 8) | b[o + 1]) >>> 0
+        setTime((t) => t + 1)
+        setLive(
+          [0, 1, 2].map((i) => {
+            const pos = u16(i * 4)
+            const tgt = u16(i * 4 + 2)
+            const error = ((tgt - pos + 540) % 360) - 180
+            return { position: pos, setpoint: tgt, error, velocity: 0, output: 0, zero: 0 }
+          }),
+        )
+      })
+    })()
+    return () => {
+      unlisten?.()
     }
-
-    frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
   }, [])
 
-  const applyGains = useCallback((index: number, next: Gains) => {
-    setGains((prev) => prev.map((g, i) => (i === index ? next : g)))
-    axesRef.current[index].integral = 0
+  const applyGains = useCallback((_index: number, _next: Gains) => {
+    setGains((prev) => prev.map((g, i) => (i === _index ? _next : g)))
   }, [])
 
   const setManualSetpoint = useCallback((index: number, value: number) => {
     setManual((prev) => prev.map((v, i) => (i === index ? value : v)))
   }, [])
 
-  const nudgeZero = useCallback((index: number, delta: number) => {
-    const axis = axesRef.current[index]
-    axis.zero = wrap360(axis.zero + delta)
-  }, [])
-
-  const zeroHere = useCallback((index: number) => {
-    const axis = axesRef.current[index]
-    axis.zero = axis.abs
-    axis.integral = 0
-  }, [])
-
-  const setZero = useCallback((index: number, value: number) => {
-    axesRef.current[index].zero = wrap360(value)
-  }, [])
-
-  const resetZero = useCallback((index: number) => {
-    axesRef.current[index].zero = 0
+  const toggleDir = useCallback((index: number) => {
+    setDirs((prev) => {
+      const next = prev.map((d, i) => (i === index ? (d ? 0 : 1) : d))
+      invoke('write_serial_data', { cmd: 0x03, payload: [index, next[index]] }).catch((e) =>
+        console.error(e),
+      )
+      return next
+    })
   }, [])
 
   return {
     time,
-    axes: snapshot,
+    axes: live ?? EMPTY_AXES,
+    liveActive: live !== null,
     mode,
     setMode,
     drivesOn,
@@ -130,9 +88,7 @@ export function usePositioner() {
     setGenerator,
     manual,
     setManualSetpoint,
-    nudgeZero,
-    zeroHere,
-    setZero,
-    resetZero,
+    dirs,
+    toggleDir,
   }
 }

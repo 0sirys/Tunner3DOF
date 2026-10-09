@@ -2,7 +2,7 @@
 
 import type { AxisSnapshot } from '@/lib/positioner'
 import { cn } from '@/lib/utils'
-import { AxisDial } from './axis-dial'
+import { AxisPlot } from './axis-plot'
 
 interface AxisCardProps {
   id: string
@@ -11,17 +11,15 @@ interface AxisCardProps {
   drivesOn: boolean
   selected: boolean
   onSelect: () => void
-  onNudgeZero: (delta: number) => void
-  onZeroHere: () => void
-  onResetZero: () => void
-  onZeroChange: (zero: number) => void
+  onInvert: () => void
+  inverted: boolean
   manualMode: boolean
   onSetpointChange: (setpoint: number) => void
 }
 
 function status(data: AxisSnapshot, drivesOn: boolean) {
   if (!drivesOn) return { text: 'DESHABILITADO', dot: 'bg-muted-foreground' }
-  if (Math.abs(data.velocity) > 1 || Math.abs(data.error) > 0.5) return { text: 'EN MOVIMIENTO', dot: 'bg-signal' }
+  if (Math.abs(data.error) > 0.5) return { text: 'EN MOVIMIENTO', dot: 'bg-signal' }
   return { text: 'EN POSICIÓN', dot: 'bg-trace' }
 }
 
@@ -37,9 +35,6 @@ function Stat({ label, value, unit, tone }: { label: string; value: string; unit
   )
 }
 
-const bezelBtn =
-  'h-9 rounded border border-border bg-panel font-mono text-sm transition-colors hover:border-muted-foreground disabled:cursor-default disabled:opacity-40 disabled:hover:border-border'
-
 export function AxisCard({
   id,
   label,
@@ -47,10 +42,8 @@ export function AxisCard({
   drivesOn,
   selected,
   onSelect,
-  onNudgeZero,
-  onZeroHere,
-  onResetZero,
-  onZeroChange,
+  onInvert,
+  inverted,
   manualMode,
   onSetpointChange,
 }: AxisCardProps) {
@@ -77,56 +70,44 @@ export function AxisCard({
         </span>
       </header>
 
-      <AxisDial
-        position={data.position}
-        setpoint={data.setpoint}
-        zero={data.zero}
-        label={`${id} ${label}`}
-        onZeroChange={onZeroChange}
-        manualMode={manualMode}
-        onSetpointChange={onSetpointChange}
-      />
+      <AxisPlot position={data.position} setpoint={data.setpoint} label={`${id} ${label}`} />
 
-      <div className="flex flex-col gap-2.5 rounded-md border border-border bg-face p-2.5">
-        <div className="flex items-baseline justify-between px-1">
-          <span className="font-mono text-xs tracking-widest text-muted-foreground">BISEL · CERO</span>
-          <span className="font-mono text-sm tabular-nums">
-            {data.zero.toFixed(1)}
-            {'° '}
-            <span className="text-muted-foreground">abs</span>
-          </span>
-        </div>
-        <div className="grid grid-cols-[1fr_1fr_2fr_auto] gap-1.5" onClick={(e) => e.stopPropagation()}>
-          <button type="button" className={bezelBtn} onClick={() => onNudgeZero(-1)}>
-            {'−1°'}
-          </button>
-          <button type="button" className={bezelBtn} onClick={() => onNudgeZero(1)}>
-            {'+1°'}
-          </button>
-          <button
-            type="button"
-            onClick={onZeroHere}
-            className="h-9 rounded bg-trace font-mono text-sm font-bold text-trace-foreground transition-colors hover:bg-trace/85"
-          >
-            CERO AQUÍ
-          </button>
-          <button
-            type="button"
-            className={cn(bezelBtn, 'px-2.5 text-xs')}
-            onClick={onResetZero}
-            disabled={data.zero === 0}
-          >
-            RST
-            <span className="sr-only"> cero del bisel</span>
-          </button>
-        </div>
+      {manualMode && (
+        <label className="flex items-center gap-2 font-mono text-sm" onClick={(e) => e.stopPropagation()}>
+          <span className="text-xs tracking-widest text-muted-foreground">CONSIGNA</span>
+          <input
+            type="number"
+            min={0}
+            max={360}
+            step="any"
+            value={Math.round(data.setpoint * 10) / 10}
+            onChange={(e) => onSetpointChange(Number(e.target.value))}
+            className="h-9 w-full rounded-md border border-border bg-face px-3 font-mono tabular-nums outline-none focus:border-signal"
+          />
+          <span className="text-xs text-muted-foreground">°</span>
+        </label>
+      )}
+
+      <div onClick={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          onClick={onInvert}
+          aria-pressed={inverted}
+          className={cn(
+            'h-9 w-full rounded font-mono text-sm font-bold transition-colors',
+            inverted
+              ? 'bg-signal text-signal-foreground hover:bg-signal/90'
+              : 'bg-trace text-trace-foreground hover:bg-trace/85',
+          )}
+        >
+          {inverted ? 'INVERTIDO' : 'INVERTIR'}
+        </button>
       </div>
 
-      <dl className="grid grid-cols-2 gap-2.5">
+      <dl className="grid grid-cols-3 gap-2.5">
         <Stat label="POSICIÓN" value={data.position.toFixed(2)} unit="°" tone="text-trace" />
         <Stat label="CONSIGNA" value={data.setpoint.toFixed(2)} unit="°" tone="text-signal" />
         <Stat label="ERROR" value={data.error.toFixed(2)} unit="°" />
-        <Stat label="VELOCIDAD" value={data.velocity.toFixed(1)} unit="°/s" />
       </dl>
 
       <div className="flex flex-col gap-2">
