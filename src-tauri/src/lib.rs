@@ -48,15 +48,27 @@ fn serial_names() -> Result<Vec<String>, String> {
 #[tauri::command]
 fn serial_open(
     state: State<PortState>,
-    _acks: State<AckState>,
+    acks: State<AckState>,
     app: AppHandle,
     port_name: String,
     baud_rate: u32,
 ) -> Result<u8, String> {
     let mut port = serial2::SerialPort::open(port_name.clone(), baud_rate)
         .map_err(|e| format!("Error al abrir puerto {port_name}: {e}"))?;
-    port.set_read_timeout(Duration::from_millis(50))
+    port.set_read_timeout(Duration::from_millis(10))
         .map_err(|e| e.to_string())?;
+    // Purga basura previa (telemetría vieja / prints de boot) antes de arrancar el lector
+    {
+        let mut tmp = [0u8; 256];
+        loop {
+            match port.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+                Err(_) => break,
+            }
+        }
+    }
     *state
         .0
         .lock()
@@ -82,20 +94,32 @@ fn serial_open(
                 Ok(0) => {
                     log::info!("MAGIC no llego {}", b[0]);
                     drop(guard);
-                    std::thread::sleep(Duration::from_millis(5));
+                    std::thread::sleep(Duration::from_millis(1));
                     continue;
                 }
                 Ok(_) => {
                     if b[0] != telemetry::MAGIC_ACK && b[0] != telemetry::MAGIC_TELEM {
                         continue;
                     }
-                    log::info!("MAGIC {}", b[0]);
                     let magic = b[0];
                     let mut hl = [0u8; 2];
                     if port.read_exact(&mut hl).is_err() {
                         continue;
                     }
+
                     let (cmd, len) = (hl[0], hl[1]);
+                    // Valida antes de leer payload: evita que un byte de datos
+                    // (p.ej. 134) se interprete como LEN y se coma la trama siguiente
+
+                    if magic == telemetry::MAGIC_ACK {
+                        if len != 1 || cmd == 0 || cmd > 0x08 {
+                            log::info!("ACK reject cmd={} len={}", cmd, len);
+                            continue;
+                        }
+                    } else if len != 12 || cmd != telemetry::CMD_TELEM {
+                        log::info!("TELEM reject cmd={} len={}", cmd, len);
+                        continue;
+                    }
                     if magic == telemetry::MAGIC_TELEM {
                         let mut payload = vec![0u8; len as usize];
                         if port.read_exact(&mut payload).is_err() {
@@ -106,8 +130,9 @@ fn serial_open(
                             continue;
                         }
                         drop(guard);
-                        let calc = payload.iter().fold(cmd ^ len, |a, b| a ^ b);
+                        let calc = payload.iter().fold(magic ^ cmd ^ len, |a, b| a ^ b);
                         if calc != chk[0] {
+                            log::error!("chk recibido {} chk esperado {}", chk[0], calc);
                             continue;
                         }
                         match telemetry::deserialize(magic, cmd, &payload) {
@@ -118,7 +143,7 @@ fn serial_open(
                             Err(_) => continue,
                         }
                     } else if magic == telemetry::MAGIC_ACK {
-                        // ACK con LEN: [56][CMD][LEN][STATUS][CHK=CMD^LEN^STATUS], LEN=1
+                        // ACK con LEN: [56][CMD][LEN][STATUS][CHK=MAGIC^CMD^LEN^STATUS], LEN=1
                         let mut payload = vec![0u8; len as usize];
                         if port.read_exact(&mut payload).is_err() {
                             continue;
@@ -128,8 +153,16 @@ fn serial_open(
                             continue;
                         }
                         drop(guard);
-                        let calc = payload.iter().fold(cmd ^ len, |a, b| a ^ b);
+                        let calc = payload.iter().fold(magic ^ cmd ^ len, |a, b| a ^ b);
                         if calc != chk[0] {
+                            log::debug!(
+                                "ACK cmd={} len={} payload={:?} chk_rx={} calc={}",
+                                cmd,
+                                len,
+                                payload,
+                                chk[0],
+                                calc
+                            );
                             continue;
                         }
                         match telemetry::deserialize(magic, cmd, &payload) {
@@ -152,8 +185,8 @@ fn serial_open(
             }
         }
     });
-    // Pide arranque de telemetría sin esperar ACK (temporal):
-    // [55][CMD_TELEM][00][CHK=CMD_TELEM]
+    // Pide arranque de telemetría esperando su ACK:
+    // TX [55][CMD_TELEM][00][CHK=MAGIC^CMD^LEN] -> ACK [56][CMD][01][STATUS][CHK]
     {
         let mut guard = state
             .0
@@ -161,18 +194,55 @@ fn serial_open(
             .map_err(|e| format!("Mutex envenenado: {e}"))?;
         let port = guard.as_mut().ok_or("puerto no abierto")?;
         let cmd = telemetry::CMD_TELEM;
-        port.write_all(&[telemetry::MAGIC_CMD, cmd, 0, cmd])
+        if let Ok(m) = acks.0.lock().as_deref_mut() {
+            m.remove(&cmd);
+        }
+        port.write_all(&[telemetry::MAGIC_CMD, cmd, 0, telemetry::MAGIC_CMD ^ cmd])
             .map_err(|e| format!("Error al pedir telemetría: {e}"))?;
     }
-    Ok(0)
+    // Espera el ACK que deposita el hilo lector (timeout 500 ms)
+    let start = Instant::now();
+    loop {
+        if let Ok(m) = acks.0.lock().as_deref_mut() {
+            if let Some(status) = m.remove(&telemetry::CMD_TELEM) {
+                telemetry::ack_ok(
+                    telemetry::CMD_TELEM,
+                    1,
+                    status,
+                    telemetry::MAGIC_ACK ^ telemetry::CMD_TELEM ^ 1 ^ status,
+                )?;
+                return Ok(status);
+            }
+        }
+        if start.elapsed() > Duration::from_millis(500) {
+            return Err("sin ACK de telemetría".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[tauri::command]
 fn serial_close(state: State<PortState>) -> Result<(), String> {
-    *state
-        .0
-        .lock()
-        .map_err(|e| format!("Mutex envenenado: {e}"))? = None;
+    {
+        let mut guard = state
+            .0
+            .lock()
+            .map_err(|e| format!("Mutex envenenado: {e}"))?;
+        // Best-effort: avisa al firmware para que pare la telemetría antes de soltar el puerto.
+        // Si el puerto ya está cerrado o falla el write, igual se cierra.
+        if let Some(port) = guard.as_mut() {
+            let cmd = telemetry::CMD_TELEM;
+            let _ = port.write_all(&[
+                telemetry::MAGIC_CMD,
+                cmd,
+                0,
+                telemetry::MAGIC_CMD ^ cmd,
+            ]);
+            // Da margen a que salga el buffer sin bloquear la UI
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        *guard = None;
+    }
     Ok(())
 }
 
@@ -190,7 +260,9 @@ fn write_serial_data(
             .map_err(|e| format!("Mutex envenenado: {e}"))?;
         let port = guard.as_mut().ok_or("puerto no abierto")?;
         let len = payload.len() as u8;
-        let chk = payload.iter().fold(cmd ^ len, |a, b| a ^ b);
+        let chk = payload
+            .iter()
+            .fold(telemetry::MAGIC_CMD ^ cmd ^ len, |a, b| a ^ b);
         let mut frame = vec![telemetry::MAGIC_CMD, cmd, len];
         frame.extend_from_slice(&payload);
         frame.push(chk);
@@ -206,13 +278,13 @@ fn write_serial_data(
     loop {
         if let Ok(m) = acks.0.lock().as_deref_mut() {
             if let Some(status) = m.remove(&cmd) {
-                telemetry::ack_ok(cmd, 1, status, cmd ^ 1 ^ status)?;
+                telemetry::ack_ok(cmd, 1, status, telemetry::MAGIC_ACK ^ cmd ^ 1 ^ status)?;
                 return Ok(status);
             }
         }
         if start.elapsed() > Duration::from_millis(500) {
             return Err("sin ACK".into());
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(1));
     }
 }

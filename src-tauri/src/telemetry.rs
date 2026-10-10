@@ -59,7 +59,7 @@ pub fn deserialize(magic: u8, cmd: u8, payload: &[u8]) -> Result<FrameData, Stri
 }
 
 pub fn ack_ok(cmd: u8, len: u8, status: u8, chk_rx: u8) -> Result<u8, String> {
-    if chk_rx != (cmd ^ len ^ status) {
+    if chk_rx != (MAGIC_ACK ^ cmd ^ len ^ status) {
         return Err("CHK ACK malo".into());
     }
     match status {

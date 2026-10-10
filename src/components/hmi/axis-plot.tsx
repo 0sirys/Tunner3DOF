@@ -39,7 +39,7 @@ export function AxisPlot({ position, setpoint, label }: AxisPlotProps) {
     lastRef.current = now
     setPosHist((prev) => [...prev.slice(-MAX_POINTS + 1), position])
     setSpHist((prev) => [...prev.slice(-MAX_POINTS + 1), setpoint])
-  }, [position, setpoint])
+  })
 
   const w = 300
   const h = 108

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { Plug, PlugZap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 
 const STATUS_LABEL: Record<string, string> = {
   disconnected: 'DESCONECTADO',
@@ -33,8 +34,34 @@ export function SerialPanel() {
         portName: ports[selectedIndex],
         baudRate,
       })
+      // No basta el open+ACK: espera la primera telemetría con CHK válido (2 s)
+      await new Promise<void>((resolve, reject) => {
+        let done = false
+        let unlisten: (() => void) | undefined
+        const timer = setTimeout(() => {
+          if (done) return
+          done = true
+          unlisten?.()
+          reject(new Error('sin telemetría (CHK)'))
+        }, 2000)
+        listen('telemetry', () => {
+          if (done) return
+          done = true
+          clearTimeout(timer)
+          unlisten?.()
+          resolve()
+        }).then((u) => {
+          if (done) u()
+          else unlisten = u
+        }).catch(reject)
+      })
       setStatus('connected')
     } catch (e) {
+      try {
+        await invoke('serial_close')
+      } catch {
+        /* best-effort */
+      }
       setStatus('error')
       console.error(e);
       setError(String(e))
