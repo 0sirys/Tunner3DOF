@@ -35,10 +35,11 @@ export const AXES = [
   { id: 'M3', label: 'Eje Z' },
 ] as const
 
+// Mismos valores que el firmware (app.c). Unidades reales: salida % por cuenta de error.
 export const DEFAULT_GAINS: Gains[] = [
-  { kp: 40, ki: 2, kd: 8 },
-  { kp: 25, ki: 1.5, kd: 5 },
-  { kp: 60, ki: 4, kd: 12 },
+  { kp: 0.08, ki: 0.001, kd: 0.001 },
+  { kp: 0.08, ki: 0.001, kd: 0.001 },
+  { kp: 0.08, ki: 0.001, kd: 0.001 },
 ]
 
 export const DEFAULT_GENERATOR: GeneratorConfig = {

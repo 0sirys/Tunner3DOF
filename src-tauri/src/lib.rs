@@ -28,6 +28,7 @@ pub fn run() {
             serial_names,
             serial_open,
             serial_close,
+            serial_is_open,
             write_serial_data,
         ])
         .run(tauri::generate_context!())
@@ -74,6 +75,59 @@ fn serial_open(
         .lock()
         .map_err(|e| format!("Mutex envenenado: {e}"))? = Some(port);
 
+    // PING de live status cada 100 ms. Espera su ACK (reader lo deposita en AckState)
+    // y emite "link" con el resultado. Muere cuando el puerto queda en None.
+    let app_ping = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            // Envía el PING
+            {
+                let state = app_ping.state::<PortState>();
+                let mut guard = match state.0.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                let port = match guard.as_mut() {
+                    Some(p) => p,
+                    None => break,
+                };
+                if let Ok(m) = app_ping.state::<AckState>().0.lock().as_deref_mut() {
+                    m.remove(&telemetry::CMD_PING);
+                }
+                let cmd = telemetry::CMD_PING;
+                let _ = port.write_all(&[
+                    telemetry::MAGIC_CMD,
+                    cmd,
+                    0,
+                    telemetry::MAGIC_CMD ^ cmd,
+                ]);
+            }
+            // Espera el ACK hasta 90 ms
+            let start = Instant::now();
+            let mut got = None;
+            while start.elapsed() < Duration::from_millis(90) {
+                if let Ok(m) = app_ping.state::<AckState>().0.lock().as_deref_mut() {
+                    if let Some(status) = m.remove(&telemetry::CMD_PING) {
+                        got = Some(status);
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let ok = matches!(got, Some(0));
+            let _ = app_ping.emit("link", ok);
+            if app_ping
+                .state::<PortState>()
+                .0
+                .lock()
+                .map(|g| g.is_none())
+                .unwrap_or(true)
+            {
+                break;
+            }
+        }
+    });
+
     std::thread::spawn(move || {
         log::info!("hilo vivo");
         loop {
@@ -112,7 +166,7 @@ fn serial_open(
                     // (p.ej. 134) se interprete como LEN y se coma la trama siguiente
 
                     if magic == telemetry::MAGIC_ACK {
-                        if len != 1 || cmd == 0 || cmd > 0x08 {
+                        if len != 1 || cmd == 0 || cmd > telemetry::CMD_SET_PWM {
                             log::info!("ACK reject cmd={} len={}", cmd, len);
                             continue;
                         }
@@ -180,13 +234,22 @@ fn serial_open(
                 }
                 Err(e) => {
                     log::error!("serial read err : {} ", e);
+                    let msg = e.to_string();
+                    // Suelta el puerto con el lock que YA tenemos (re-bloquear aquí = deadlock)
+                    *guard = None;
+                    drop(guard);
+                    match app.emit("serial-error", msg.clone()) {
+                        Ok(_) => log::info!("serial-error notificado al front: {}", msg),
+                        Err(emit_e) => log::error!("no se pudo emitir serial-error: {}", emit_e),
+                    }
                     break;
                 }
             }
         }
     });
     // Pide arranque de telemetría esperando su ACK:
-    // TX [55][CMD_TELEM][00][CHK=MAGIC^CMD^LEN] -> ACK [56][CMD][01][STATUS][CHK]
+    // TX [55][CMD_TELEM][01][ON=1][CHK] -> ACK [56][CMD][01][STATUS][CHK]
+    // Encendido explícito (no toggle): si el tuner se cerró sin avisar, no la apaga.
     {
         let mut guard = state
             .0
@@ -197,7 +260,7 @@ fn serial_open(
         if let Ok(m) = acks.0.lock().as_deref_mut() {
             m.remove(&cmd);
         }
-        port.write_all(&[telemetry::MAGIC_CMD, cmd, 0, telemetry::MAGIC_CMD ^ cmd])
+        port.write_all(&[telemetry::MAGIC_CMD, cmd, 1, 1, telemetry::MAGIC_CMD ^ cmd ^ 1 ^ 1])
             .map_err(|e| format!("Error al pedir telemetría: {e}"))?;
     }
     // Espera el ACK que deposita el hilo lector (timeout 500 ms)
@@ -222,6 +285,15 @@ fn serial_open(
 }
 
 #[tauri::command]
+fn serial_is_open(state: State<PortState>) -> Result<bool, String> {
+    Ok(state
+        .0
+        .lock()
+        .map_err(|e| format!("Mutex envenenado: {e}"))?
+        .is_some())
+}
+
+#[tauri::command]
 fn serial_close(state: State<PortState>) -> Result<(), String> {
     {
         let mut guard = state
@@ -231,12 +303,14 @@ fn serial_close(state: State<PortState>) -> Result<(), String> {
         // Best-effort: avisa al firmware para que pare la telemetría antes de soltar el puerto.
         // Si el puerto ya está cerrado o falla el write, igual se cierra.
         if let Some(port) = guard.as_mut() {
+            // Apagado explícito: [55][CMD_TELEM][01][ON=0][CHK]
             let cmd = telemetry::CMD_TELEM;
             let _ = port.write_all(&[
                 telemetry::MAGIC_CMD,
                 cmd,
+                1,
                 0,
-                telemetry::MAGIC_CMD ^ cmd,
+                telemetry::MAGIC_CMD ^ cmd ^ 1,
             ]);
             // Da margen a que salga el buffer sin bloquear la UI
             std::thread::sleep(Duration::from_millis(20));

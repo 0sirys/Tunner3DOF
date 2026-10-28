@@ -9,6 +9,9 @@ pub const CMD_SET_HOME: u8 = 0x05;
 pub const CMD_RD: u8 = 0x06;
 pub const CMD_SAVE: u8 = 0x07;
 pub const CMD_TELEM: u8 = 0x08;
+pub const CMD_WAVE: u8 = 0x09;
+pub const CMD_PING: u8 = 0x0a;
+pub const CMD_SET_PWM: u8 = 0x0b; // [j][min u16BE][max u16BE] décimas de %; último CMD válido
 
 #[derive(serde::Serialize, Clone)]
 pub struct Telem {

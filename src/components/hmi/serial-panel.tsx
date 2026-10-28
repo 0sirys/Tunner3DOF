@@ -22,8 +22,26 @@ export function SerialPanel() {
   const [ports, setPorts] = useState<string[]>([])
   const [selectedIndex, setSelectedIndex] = useState<number | null>(0)
   const [error, setError] = useState<string | null>(null)
+  const [link, setLink] = useState<boolean | null>(null)
 
   const locked = status === 'connected' || status === 'connecting'
+
+  const refreshPorts = async () => {
+    if (locked) return
+    try {
+      const names = await invoke<string[]>('serial_names');
+      const current = selectedIndex !== null ? ports[selectedIndex] : undefined
+      setPorts(names)
+      if (names.length === 0) setSelectedIndex(null)
+      else if (current !== undefined && names.includes(current)) {
+        setSelectedIndex(names.indexOf(current))
+      } else {
+        setSelectedIndex(0)
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
 
   const handleConnect = async () => {
     if (selectedIndex === null) return
@@ -75,6 +93,7 @@ export function SerialPanel() {
       console.error(e)
     }
     setStatus('disconnected')
+    setLink(null)
   }
 
   useEffect(() => {
@@ -87,7 +106,47 @@ export function SerialPanel() {
         console.error(e);
       }
     })();
+    // El hilo lector murió (p.ej. Access denied os error 5): vuelve a DESCONECTADO
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+    let unlistenLink: (() => void) | undefined
+    ;(async () => {
+      unlisten = await listen<string>('serial-error', (e) => {
+        console.error(e.payload)
+        setError(String(e.payload))
+        setStatus('disconnected')
+        setLink(null)
+      })
+      // Live status: ACK del PING cada 100 ms
+      unlistenLink = await listen<boolean>('link', (e) => setLink(e.payload))
+      if (cancelled) {
+        unlisten()
+        unlistenLink()
+      }
+    })()
+    return () => {
+      cancelled = true
+      unlisten?.()
+      unlistenLink?.()
+    }
   }, []);
+
+  // Respaldo por si se pierde el evento: sondea el estado real del puerto
+  useEffect(() => {
+    if (status !== 'connected') return
+    const id = setInterval(async () => {
+      try {
+        const open = await invoke<boolean>('serial_is_open')
+        if (!open) {
+          setError('puerto cerrado por error de lectura')
+          setStatus('disconnected')
+        }
+      } catch (e) {
+        console.error(e)
+      }
+    }, 2000)
+    return () => clearInterval(id)
+  }, [status]);
 
   return (
     <section aria-labelledby="serial-title" className="flex flex-col gap-4">
@@ -115,6 +174,25 @@ export function SerialPanel() {
         </span>
       </div>
 
+      {status === 'connected' && (
+        <div
+          className={cn(
+            'flex items-center gap-2 font-mono text-xs tracking-widest',
+            link === null && 'text-muted-foreground',
+            link === true && 'text-trace',
+            link === false && 'text-destructive',
+          )}
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            className={cn('size-1.5 rounded-full bg-current', link !== false && 'animate-pulse')}
+            aria-hidden="true"
+          />
+          LINK {link === null ? '—' : link ? 'OK' : 'SIN ACK'}
+        </div>
+      )}
+
       <div className="flex flex-col gap-2">
         <label htmlFor="serial-port" className="flex items-baseline justify-between">
           <span className="font-mono text-base font-bold">Puerto COM</span>
@@ -128,8 +206,9 @@ export function SerialPanel() {
             <select
               id="serial-port"
               className={selectClass}
-              disabled={locked || ports.length === 0}
+              disabled={locked}
               value={selectedIndex ?? ''}
+              onFocus={refreshPorts}
               onChange={(e) => setSelectedIndex(Number(e.target.value))}
             >
               {ports.length === 0 ? (

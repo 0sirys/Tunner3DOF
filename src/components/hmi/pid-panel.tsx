@@ -10,6 +10,8 @@ type Draft = Record<keyof Gains, string>
 
 const toDraft = (g: Gains): Draft => ({ kp: String(g.kp), ki: String(g.ki), kd: String(g.kd) })
 const CMD_SET_PID = 0x01;
+const CMD_SAVE = 0x07;
+const GAIN_MAX = 32.767;
 
 const FIELDS: { key: keyof Gains; label: string; hint: string }[] = [
   { key: 'kp', label: 'Kp', hint: 'Ganancia proporcional' },
@@ -34,7 +36,8 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
     ki: Number.parseFloat(draft.ki),
     kd: Number.parseFloat(draft.kd),
   }
-  const valid = Object.values(parsed).every((v) => Number.isFinite(v) && v >= 0 && v <= 1000)
+  // Se envían como int16 x1000: el máximo representable es 32.767
+  const valid = Object.values(parsed).every((v) => Number.isFinite(v) && v >= 0 && v <= GAIN_MAX)
   const dirty = parsed.kp !== applied.kp || parsed.ki !== applied.ki || parsed.kd !== applied.kd
   const canApply = valid && dirty
 
@@ -47,9 +50,10 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
     //  ejemplo payload   [j][kpH][kpL][kiH][kiL][kdH][kdL]   (LEN=7, int16 x1000 BE)
     const buf = new DataView(new ArrayBuffer(7));
     buf.setUint8(0, selected);
-    buf.setUint16(1, parsed.kp, false);
-    buf.setUint16(3, parsed.ki, false);
-    buf.setUint16(5, parsed.kd, false);
+    // El firmware divide entre 1000: Kp=0.08 viaja como 80.
+    buf.setInt16(1, Math.round(parsed.kp * 1000), false);
+    buf.setInt16(3, Math.round(parsed.ki * 1000), false);
+    buf.setInt16(5, Math.round(parsed.kd * 1000), false);
     try {
 
       await invoke('write_serial_data', {
@@ -64,6 +68,24 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
 
   const restoreDefaults = () =>
     setDrafts((prev) => prev.map((d, i) => (i === selected ? toDraft(DEFAULT_GAINS[i]) : d)))
+
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  // SAVE sin payload (LEN=0): TX 55 07 00 52 — vuelca espejo a Flash (~40ms)
+  const save = async () => {
+    if (saving) return
+    setSaving(true)
+    setSaved(false)
+    try {
+      await invoke('write_serial_data', { cmd: CMD_SAVE, payload: [] })
+      setSaved(true)
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <section aria-labelledby="pid-title" className="flex flex-col gap-4">
@@ -110,7 +132,7 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
               inputMode="decimal"
               step="any"
               min={0}
-              max={1000}
+              max={GAIN_MAX}
               value={draft[key]}
               onChange={(e) => updateDraft(key, e.target.value)}
               aria-invalid={!Number.isFinite(parsed[key]) || parsed[key] < 0}
@@ -145,6 +167,19 @@ export function PidPanel({ selected, onSelect, gains, onApply }: PidPanelProps) 
             <span className="sr-only">Restaurar valores por defecto de {AXES[selected].id}</span>
           </button>
         </div>
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving}
+          className={cn(
+            'h-12 w-full rounded-md border font-mono text-sm font-bold tracking-widest transition-colors',
+            saved
+              ? 'border-trace text-trace'
+              : 'border-border text-muted-foreground hover:text-foreground disabled:cursor-wait disabled:opacity-60',
+          )}
+        >
+          {saving ? 'GUARDANDO…' : saved ? 'GUARDADO EN FLASH' : 'GUARDAR EN FLASH'}
+        </button>
       </form>
 
       <table className="w-full font-mono text-sm">
